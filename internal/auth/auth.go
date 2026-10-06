@@ -17,17 +17,11 @@ type UserStorage interface {
 	CreateUser(ctx context.Context, login, passwordHash string) (model.UserID, error)
 }
 
-type Claims struct {
-	jwt.RegisteredClaims
-	UserID model.UserID
-}
-
 type Auth struct {
 	secretKey string
 	tokenExp  time.Duration
 	storage   UserStorage
 }
-
 type ctxKey string
 
 const userIDKey ctxKey = "user_id"
@@ -49,29 +43,25 @@ func (auth *Auth) UserIDFromContext(ctx context.Context) model.UserID {
 	return userID
 }
 
-func (auth *Auth) IsTokenExpiredOnlyError(err error) bool {
-	var validationErr *jwt.ValidationError
-	return errors.As(err, &validationErr) && validationErr.Errors == jwt.ValidationErrorExpired
-}
-
-func (auth *Auth) BuildToken(userID model.UserID) (string, error) {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
+func (auth *Auth) BuildToken(userID model.UserID) (string, time.Time, error) {
+	expiresAt := time.Now().Add(auth.tokenExp)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, model.Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(auth.tokenExp)),
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
 		},
 		UserID: userID,
 	})
 
 	tokenString, err := token.SignedString([]byte(auth.secretKey))
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 
-	return tokenString, nil
+	return tokenString, expiresAt, nil
 }
 
-func (auth *Auth) ParseToken(tokenString string) (model.UserID, error) {
-	claims := &Claims{}
+func (auth *Auth) ParseToken(tokenString string) (*model.Claims, error) {
+	claims := &model.Claims{}
 	keyFunc := func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
@@ -80,7 +70,15 @@ func (auth *Auth) ParseToken(tokenString string) (model.UserID, error) {
 	}
 	_, err := jwt.ParseWithClaims(tokenString, claims, keyFunc)
 
-	return claims.UserID, err
+	return claims, err
+}
+
+func (auth *Auth) NeedsRefresh(claims *model.Claims) bool {
+	if claims.ExpiresAt == nil {
+		return true
+	}
+
+	return time.Until(claims.ExpiresAt.Time) < auth.tokenExp/2
 }
 
 func (auth *Auth) hashPassword(password string) (string, error) {
