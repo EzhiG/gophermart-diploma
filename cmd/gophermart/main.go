@@ -12,6 +12,7 @@ import (
 	"github.com/EzhiG/gophermart-diploma/internal/config"
 	"github.com/EzhiG/gophermart-diploma/internal/handler"
 	"github.com/EzhiG/gophermart-diploma/internal/logger"
+	"github.com/EzhiG/gophermart-diploma/internal/repository"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -21,8 +22,15 @@ func main() {
 		sugar.Fatal(err)
 	}
 	defer sugar.Sync()
+
 	cfg := config.New()
 
+	storage, err := repository.NewPGStorage(cfg.DatabaseURI)
+	if err != nil {
+		sugar.Fatal(err)
+	}
+
+	defer storage.Close()
 	loggerMw := logger.NewMiddleware(sugar)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
