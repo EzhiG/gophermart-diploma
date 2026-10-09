@@ -9,10 +9,15 @@ type Config struct {
 	RunAddress           string
 	DatabaseURI          string
 	AccrualSystemAddress string
+	SecretKey            string
 }
+
+// TODO: по-хорошему, это должно быть в env variables
+const secretKey = "MySecretKey"
 
 func New() *Config {
 	cfg := new(Config)
+	cfg.SecretKey = secretKey
 
 	flag.StringVar(&cfg.RunAddress, "a", "localhost:8080", "http service address")
 	flag.StringVar(&cfg.DatabaseURI, "d", "", "database uri")
