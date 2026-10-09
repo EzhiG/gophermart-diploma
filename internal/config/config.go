@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"os"
+	"time"
 )
 
 type Config struct {
@@ -10,14 +11,17 @@ type Config struct {
 	DatabaseURI          string
 	AccrualSystemAddress string
 	SecretKey            string
+	TokenExpirationTime  time.Duration
 }
 
 // TODO: по-хорошему, это должно быть в env variables
 const secretKey = "MySecretKey"
+const tokenExpirationTime = 60
 
 func New() *Config {
 	cfg := new(Config)
 	cfg.SecretKey = secretKey
+	cfg.TokenExpirationTime = tokenExpirationTime
 
 	flag.StringVar(&cfg.RunAddress, "a", "localhost:8080", "http service address")
 	flag.StringVar(&cfg.DatabaseURI, "d", "", "database uri")

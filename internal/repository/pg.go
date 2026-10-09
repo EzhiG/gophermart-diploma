@@ -155,6 +155,31 @@ func (s *PGStorage) GetUserOrderList(ctx context.Context, userID model.UserID) (
 	return orders, nil
 }
 
+func (s *PGStorage) GetUnfinishedOrders(ctx context.Context) ([]string, error) {
+	orderNumbers := make([]string, 0)
+	query := `SELECT number FROM orders WHERE status IN ('NEW', 'PROCESSING') ORDER BY uploaded_at LIMIT 100`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var orderNumber string
+		err := rows.Scan(&orderNumber)
+		if err != nil {
+			return nil, err
+		}
+		orderNumbers = append(orderNumbers, orderNumber)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return orderNumbers, nil
+}
+
 func (s *PGStorage) UpdateUserOrderStatus(ctx context.Context, orderNumber string, status model.OrderStatus) error {
 	_, err := updateUserOrder(ctx, s.db, orderNumber, status, nil)
 	return err
@@ -269,7 +294,7 @@ func updateUserOrder(ctx context.Context, exec sqlExecutor, orderNumber string, 
 	err := row.Scan(&userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, gophermart.ErrOrderNotFound
+			return 0, gophermart.ErrOrderAlreadyProcessed
 		}
 		return 0, err
 	}

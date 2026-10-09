@@ -109,6 +109,9 @@ func (a *Auth) checkPasswordHash(password, hash string) error {
 }
 
 func (a *Auth) Register(ctx context.Context, login, password string) (model.UserID, error) {
+	if len(login) == 0 || len(password) == 0 {
+		return 0, gophermart.ErrInvalidCredentials
+	}
 	hash, err := a.hashPassword(password)
 	if err != nil {
 		return 0, err
@@ -118,6 +121,9 @@ func (a *Auth) Register(ctx context.Context, login, password string) (model.User
 }
 
 func (a *Auth) Login(ctx context.Context, login, password string) (model.UserID, error) {
+	if len(login) == 0 || len(password) == 0 {
+		return 0, gophermart.ErrInvalidCredentials
+	}
 	credentials, err := a.storage.GetUserCredentials(ctx, login)
 	if err != nil {
 		if errors.Is(err, gophermart.ErrUserNotFound) {

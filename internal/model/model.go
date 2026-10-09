@@ -56,10 +56,10 @@ type UserWithdrawalItem struct {
 
 type UserWithdrawalListResponse []UserWithdrawalItem
 
-type AccrualOrderStatus struct {
-	Order   string   `json:"order"`
-	Status  string   `json:"status"`
-	Accrual *float64 `json:"accrual,omitempty"`
+type AccrualOrder struct {
+	Order   string             `json:"order"`
+	Status  AccrualOrderStatus `json:"status"`
+	Accrual *float64           `json:"accrual,omitempty"`
 }
 
 type OrderStatus string
@@ -69,4 +69,13 @@ const (
 	OrderStatusProcessing OrderStatus = "PROCESSING"
 	OrderStatusInvalid    OrderStatus = "INVALID"
 	OrderStatusProcessed  OrderStatus = "PROCESSED"
+)
+
+type AccrualOrderStatus string
+
+const (
+	AccrualOrderStatusRegistered AccrualOrderStatus = "REGISTERED"
+	AccrualOrderStatusProcessing AccrualOrderStatus = "PROCESSING"
+	AccrualOrderStatusInvalid    AccrualOrderStatus = "INVALID"
+	AccrualOrderStatusProcessed  AccrualOrderStatus = "PROCESSED"
 )

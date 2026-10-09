@@ -9,7 +9,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/EzhiG/gophermart-diploma/internal/auth"
 	"github.com/EzhiG/gophermart-diploma/internal/config"
+	"github.com/EzhiG/gophermart-diploma/internal/gophermart"
 	"github.com/EzhiG/gophermart-diploma/internal/handler"
 	"github.com/EzhiG/gophermart-diploma/internal/logger"
 	"github.com/EzhiG/gophermart-diploma/internal/repository"
@@ -31,13 +33,24 @@ func main() {
 	}
 
 	defer storage.Close()
+	authSvc := auth.New(cfg.SecretKey, cfg.TokenExpirationTime, storage)
+	martSvc := gophermart.New(storage, cfg.AccrualSystemAddress)
+	h := handler.New(authSvc, martSvc, sugar)
 	loggerMw := logger.NewMiddleware(sugar)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	router := chi.NewRouter()
 	router.Use(loggerMw, handler.MaxBytesMiddleware, handler.GzipMiddleware)
-
+	router.Post("/api/user/register", h.APIPostUserRegister)
+	router.Post("/api/user/login", h.APIPostUserLogin)
+	router.Group(func(r chi.Router) {
+		r.Use(h.NewAuthMiddleware())
+		r.Post("/api/user/order", h.APIPostUserOrder)
+		r.Get("/api/user/balance", h.APIGetUserBalance)
+		r.Post("/api/user/withdraw", h.APIPostUserWithdraw)
+		r.Get("/api/user/withdrawals", h.APIGetUserWithdrawals)
+	})
 	srv := &http.Server{Addr: cfg.RunAddress, Handler: router}
 
 	go func() {

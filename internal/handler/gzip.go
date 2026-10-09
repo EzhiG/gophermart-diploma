@@ -93,7 +93,7 @@ func hasSupportedContentType(contentType string) bool {
 	return false
 }
 
-func GzipMiddleware(next http.Handler) http.Handler {
+func (h *Handler) GzipMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ow := w
 
@@ -106,6 +106,7 @@ func GzipMiddleware(next http.Handler) http.Handler {
 		if strings.Contains(r.Header.Get("Content-Encoding"), "gzip") {
 			cr, err := newCompressReader(r.Body)
 			if err != nil {
+				h.logger.Error(err)
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
