@@ -1,0 +1,13 @@
+version: "2"
+
+linters:
+  enable:
+    - rowserrcheck
+    - sqlclosecheck
+    - nilerr
+
+  exclusions:
+    rules:
+      - linters:
+          - errcheck
+        source: '^\s*defer\s'
