@@ -34,21 +34,24 @@ func main() {
 
 	defer storage.Close()
 	authSvc := auth.New(cfg.SecretKey, cfg.TokenExpirationTime, storage)
-	martSvc := gophermart.New(storage, cfg.AccrualSystemAddress)
+	martSvc := gophermart.New(storage, cfg.AccrualSystemAddress, sugar)
 	h := handler.New(authSvc, martSvc, sugar)
 	loggerMw := logger.NewMiddleware(sugar)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	go martSvc.RunAccrualSync(ctx)
+
 	router := chi.NewRouter()
-	router.Use(loggerMw, handler.MaxBytesMiddleware, handler.GzipMiddleware)
+	router.Use(loggerMw, handler.MaxBytesMiddleware, h.GzipMiddleware)
 	router.Post("/api/user/register", h.APIPostUserRegister)
 	router.Post("/api/user/login", h.APIPostUserLogin)
 	router.Group(func(r chi.Router) {
 		r.Use(h.NewAuthMiddleware())
-		r.Post("/api/user/order", h.APIPostUserOrder)
+		r.Post("/api/user/orders", h.APIPostUserOrder)
+		r.Get("/api/user/orders", h.APIGetUserOrders)
 		r.Get("/api/user/balance", h.APIGetUserBalance)
-		r.Post("/api/user/withdraw", h.APIPostUserWithdraw)
+		r.Post("/api/user/balance/withdraw", h.APIPostUserWithdraw)
 		r.Get("/api/user/withdrawals", h.APIGetUserWithdrawals)
 	})
 	srv := &http.Server{Addr: cfg.RunAddress, Handler: router}
@@ -66,4 +69,5 @@ func main() {
 	if err != nil {
 		sugar.Error(err)
 	}
+	martSvc.WaitAccrualSync()
 }

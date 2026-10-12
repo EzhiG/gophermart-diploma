@@ -16,7 +16,7 @@ type Config struct {
 
 // TODO: по-хорошему, это должно быть в env variables
 const secretKey = "MySecretKey"
-const tokenExpirationTime = 60
+const tokenExpirationTime = 24 * time.Hour
 
 func New() *Config {
 	cfg := new(Config)

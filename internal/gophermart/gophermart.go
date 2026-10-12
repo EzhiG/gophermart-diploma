@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/EzhiG/gophermart-diploma/internal/model"
+	"go.uber.org/zap"
 )
 
 type Storage interface {
@@ -26,10 +27,72 @@ type Storage interface {
 type Gophermart struct {
 	storage              Storage
 	accrualSystemAddress string
+	logger               *zap.SugaredLogger
+	doneCh               chan struct{}
 }
 
-func New(storage Storage, accrualSystemAddress string) *Gophermart {
-	return &Gophermart{storage, accrualSystemAddress}
+func New(storage Storage, accrualSystemAddress string, logger *zap.SugaredLogger) *Gophermart {
+	return &Gophermart{
+		storage:              storage,
+		accrualSystemAddress: accrualSystemAddress,
+		logger:               logger,
+		doneCh:               make(chan struct{}),
+	}
+}
+
+func (g *Gophermart) WaitAccrualSync() {
+	<-g.doneCh
+}
+
+func (g *Gophermart) RunAccrualSync(ctx context.Context) {
+	defer close(g.doneCh)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			g.syncOrders(ctx)
+		}
+	}
+
+}
+
+func (g *Gophermart) syncOrders(ctx context.Context) {
+	orders, err := g.storage.GetUnfinishedOrders(ctx)
+	if err != nil {
+		g.logger.Errorw("Failed to get unfinished orders", "error", err)
+		return
+	}
+
+	for _, order := range orders {
+		if ctx.Err() != nil {
+			return
+		}
+
+		err = g.SyncOrder(ctx, order)
+		if err != nil {
+			if errors.Is(err, ErrAccrualOrderNotFound) {
+				g.logger.Debugw("Accrual order not found", "order", order)
+				continue
+			}
+			var retryAfterError *AccrualRequestLimitError
+			if errors.As(err, &retryAfterError) {
+				g.logger.Warnw("Accrual limit reached", "order", order, "message", retryAfterError.Message, "retryAfter", retryAfterError.RetryAfterSeconds)
+
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Duration(retryAfterError.RetryAfterSeconds) * time.Second):
+					continue
+				}
+			}
+			g.logger.Errorw("Failed to sync orders", "error", err, "order", order)
+			continue
+		}
+	}
 }
 
 func (g *Gophermart) CreateOrder(ctx context.Context, userID model.UserID, orderNumber string) error {
@@ -132,6 +195,10 @@ func getAccrualOrder(ctx context.Context, address, orderNumber string) (*model.A
 			return nil, NewAccrualRequestLimitError(message, 60)
 		}
 		return nil, NewAccrualRequestLimitError(message, retryAfter)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.New(resp.Status)
 	}
 
 	var accrualOrder model.AccrualOrder
