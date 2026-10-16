@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"regexp"
 	"strconv"
 	"time"
 
@@ -210,18 +209,19 @@ func getAccrualOrder(ctx context.Context, address, orderNumber string) (*model.A
 	return &accrualOrder, nil
 }
 
-var digitsRe = regexp.MustCompile(`\d+`)
-
 func checkLuhn(orderNumber string) bool {
-	if !digitsRe.MatchString(orderNumber) {
+	nDigit := len(orderNumber)
+	if nDigit == 0 {
 		return false
 	}
-
 	sum := 0
-	nDigit := len(orderNumber)
 	parity := nDigit % 2
 
 	for i := range nDigit {
+		if orderNumber[i] < '0' || orderNumber[i] > '9' {
+			return false
+		}
+
 		digit := int(orderNumber[i] - '0')
 		if i%2 == parity {
 			digit = digit * 2

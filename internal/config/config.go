@@ -19,14 +19,19 @@ const secretKey = "MySecretKey"
 const tokenExpirationTime = 24 * time.Hour
 
 func New() *Config {
+	return parse(os.Args[1:])
+}
+
+func parse(args []string) *Config {
+	fs := flag.NewFlagSet("gophermart", flag.ExitOnError)
 	cfg := new(Config)
 	cfg.SecretKey = secretKey
 	cfg.TokenExpirationTime = tokenExpirationTime
 
-	flag.StringVar(&cfg.RunAddress, "a", "localhost:8080", "http service address")
-	flag.StringVar(&cfg.DatabaseURI, "d", "", "database uri")
-	flag.StringVar(&cfg.AccrualSystemAddress, "r", "", "accrual system address")
-	flag.Parse()
+	fs.StringVar(&cfg.RunAddress, "a", "localhost:8080", "http service address")
+	fs.StringVar(&cfg.DatabaseURI, "d", "", "database uri")
+	fs.StringVar(&cfg.AccrualSystemAddress, "r", "", "accrual system address")
+	_ = fs.Parse(args)
 
 	if envRunAddr, ok := os.LookupEnv("RUN_ADDRESS"); ok {
 		cfg.RunAddress = envRunAddr
