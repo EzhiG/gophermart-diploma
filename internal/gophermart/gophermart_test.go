@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/EzhiG/gophermart-diploma/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -52,46 +54,47 @@ func TestGophermart_CheckLuhn(t *testing.T) {
 }
 
 type fakeStorage struct {
+	orders     []string
 	err        error
 	created    bool
-	called     string
+	called     []string
 	gotStatus  model.OrderStatus
 	gotAccrual float64
 }
 
 func (s *fakeStorage) GetUserBalance(_ context.Context, _ model.UserID) (*model.UserBalance, error) {
-	s.called = "GetUserBalance"
+	s.called = append(s.called, "GetUserBalance")
 	return nil, s.err
 }
 func (s *fakeStorage) CreateUserOrder(_ context.Context, _ model.UserID, _ string) (bool, error) {
-	s.called = "CreateUserOrder"
+	s.called = append(s.called, "CreateUserOrder")
 	return s.created, s.err
 }
 func (s *fakeStorage) GetUserOrderList(_ context.Context, _ model.UserID) ([]model.UserOrderItem, error) {
-	s.called = "GetUserOrderList"
+	s.called = append(s.called, "GetUserOrderList")
 	return nil, s.err
 }
 func (s *fakeStorage) UpdateUserOrderStatus(_ context.Context, _ string, status model.OrderStatus) error {
 	s.gotStatus = status
-	s.called = "UpdateUserOrderStatus"
+	s.called = append(s.called, "UpdateUserOrderStatus")
 	return s.err
 }
 func (s *fakeStorage) SetUserOrderProcessed(_ context.Context, _ string, accrual float64) error {
 	s.gotAccrual = accrual
-	s.called = "SetUserOrderProcessed"
+	s.called = append(s.called, "SetUserOrderProcessed")
 	return s.err
 }
 func (s *fakeStorage) GetUserWithdrawals(_ context.Context, _ model.UserID) ([]model.UserWithdrawalItem, error) {
-	s.called = "GetUserWithdrawals"
+	s.called = append(s.called, "GetUserWithdrawals")
 	return nil, s.err
 }
-func (s *fakeStorage) WithdrawUserBalance(_ context.Context, _ model.UserID, _ string, sum float64) error {
-	s.called = "WithdrawUserBalance"
+func (s *fakeStorage) WithdrawUserBalance(_ context.Context, _ model.UserID, _ string, _ float64) error {
+	s.called = append(s.called, "WithdrawUserBalance")
 	return s.err
 }
 func (s *fakeStorage) GetUnfinishedOrders(_ context.Context) ([]string, error) {
-	s.called = "GetUnfinishedOrders"
-	return nil, s.err
+	s.called = append(s.called, "GetUnfinishedOrders")
+	return s.orders, s.err
 }
 
 var _ Storage = (*fakeStorage)(nil)
@@ -100,6 +103,14 @@ const validNumber = "79927398713"
 
 var logger = zap.NewNop().Sugar()
 var errStorageError = errors.New("storage error")
+
+func last(arr []string) string {
+	if len(arr) == 0 {
+		return ""
+	}
+
+	return arr[len(arr)-1]
+}
 
 func TestGophermart_CreateOrder(t *testing.T) {
 	tests := []struct {
@@ -144,7 +155,7 @@ func TestGophermart_CreateOrder(t *testing.T) {
 			g := New(tt.storage, "http://accrual", logger)
 			err := g.CreateOrder(t.Context(), 1, tt.orderNumber)
 			assert.ErrorIs(t, err, tt.wantErr)
-			assert.Equal(t, tt.wantCalled, tt.storage.called)
+			assert.Equal(t, tt.wantCalled, last(tt.storage.called))
 		})
 	}
 }
@@ -215,7 +226,7 @@ func TestGophermart_UserWithdraw(t *testing.T) {
 			g := New(tt.storage, "http://accrual", logger)
 			err := g.UserWithdraw(t.Context(), 1, tt.orderNumber, tt.sum)
 			assert.ErrorIs(t, err, tt.wantErr)
-			assert.Equal(t, tt.wantCalled, tt.storage.called)
+			assert.Equal(t, tt.wantCalled, last(tt.storage.called))
 		})
 	}
 }
@@ -426,7 +437,7 @@ func TestGophermart_SyncOrder(t *testing.T) {
 			g := New(tt.storage, srv.URL, logger)
 			err := g.SyncOrder(t.Context(), validNumber)
 			assert.ErrorIs(t, err, tt.wantErr)
-			assert.Equal(t, tt.wantCalled, tt.storage.called)
+			assert.Equal(t, tt.wantCalled, last(tt.storage.called))
 			assert.Equal(t, tt.wantStatus, tt.storage.gotStatus)
 			assert.Equal(t, tt.wantAccrual, tt.storage.gotAccrual)
 		})
@@ -474,7 +485,159 @@ func TestGophermart_PassThrough(t *testing.T) {
 			g := New(storage, "http://accrual", logger)
 			err := tt.call(t.Context(), g)
 			assert.ErrorIs(t, err, tt.wantErr)
+			assert.Equal(t, tt.wantCalled, last(storage.called))
+		})
+	}
+}
+
+func TestGophermart_syncOrders(t *testing.T) {
+	type accrualResponse struct {
+		status     int
+		retryAfter string
+		body       string
+	}
+	processing := accrualResponse{status: http.StatusOK, body: `{"status":"PROCESSING"}`}
+
+	tests := []struct {
+		name       string
+		orders     []string
+		storageErr error
+		responses  map[string]accrualResponse
+		ctx        func(t *testing.T) context.Context
+		wantCalled []string
+	}{
+		{
+			name:       "get unfinished orders error",
+			orders:     []string{"1"},
+			storageErr: errStorageError,
+			responses:  map[string]accrualResponse{"1": processing},
+			wantCalled: []string{"GetUnfinishedOrders"},
+		},
+		{
+			name:       "no orders",
+			wantCalled: []string{"GetUnfinishedOrders"},
+		},
+		{
+			name:       "sync all orders",
+			orders:     []string{"1", "2"},
+			responses:  map[string]accrualResponse{"1": processing, "2": processing},
+			wantCalled: []string{"GetUnfinishedOrders", "UpdateUserOrderStatus", "UpdateUserOrderStatus"},
+		},
+		{
+			name:   "not found continue",
+			orders: []string{"1", "2"},
+			responses: map[string]accrualResponse{
+				"1": {status: http.StatusNoContent},
+				"2": processing,
+			},
+			wantCalled: []string{"GetUnfinishedOrders", "UpdateUserOrderStatus"},
+		},
+		{
+			name:   "unknown error continue",
+			orders: []string{"1", "2"},
+			responses: map[string]accrualResponse{
+				"1": {status: http.StatusInternalServerError},
+				"2": processing,
+			},
+			wantCalled: []string{"GetUnfinishedOrders", "UpdateUserOrderStatus"},
+		},
+		{
+			name:   "request limit continue after retry",
+			orders: []string{"1", "2"},
+			responses: map[string]accrualResponse{
+				"1": {status: http.StatusTooManyRequests, retryAfter: "0", body: "too many requests"},
+				"2": processing,
+			},
+			wantCalled: []string{"GetUnfinishedOrders", "UpdateUserOrderStatus"},
+		},
+		{
+			name:   "request limit ctx cancelled while waiting",
+			orders: []string{"1", "2"},
+			responses: map[string]accrualResponse{
+				"1": {status: http.StatusTooManyRequests, retryAfter: "60", body: "too many requests"},
+				"2": processing,
+			},
+			ctx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantCalled: []string{"GetUnfinishedOrders"},
+		},
+		{
+			name:      "ctx cancelled before sync",
+			orders:    []string{"1"},
+			responses: map[string]accrualResponse{"1": processing},
+			ctx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				return ctx
+			},
+			wantCalled: []string{"GetUnfinishedOrders"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := tt.responses[strings.TrimPrefix(r.URL.Path, "/api/orders/")]
+				if resp.retryAfter != "" {
+					w.Header().Set("Retry-After", resp.retryAfter)
+				}
+				w.WriteHeader(resp.status)
+				_, _ = w.Write([]byte(resp.body))
+			}))
+			t.Cleanup(server.Close)
+
+			ctx := t.Context()
+			if tt.ctx != nil {
+				ctx = tt.ctx(t)
+			}
+			storage := &fakeStorage{orders: tt.orders, err: tt.storageErr}
+			g := New(storage, server.URL, logger)
+
+			start := time.Now()
+			g.syncOrders(ctx)
+			assert.Less(t, time.Since(start), time.Second)
 			assert.Equal(t, tt.wantCalled, storage.called)
 		})
 	}
+}
+
+func TestGophermart_RunAccrualSync(t *testing.T) {
+	waitAccrualSync := func(t *testing.T, g *Gophermart, timeout time.Duration) {
+		doneCh := make(chan struct{})
+		go func() {
+			g.WaitAccrualSync()
+			close(doneCh)
+		}()
+		select {
+		case <-doneCh:
+		case <-time.After(timeout):
+			t.Fatal("RunAccrualSync did not stop after ctx cancel")
+		}
+	}
+
+	t.Run("stop on ctx cancel", func(t *testing.T) {
+		storage := &fakeStorage{}
+		g := New(storage, "http://accrual", logger)
+		ctx, cancel := context.WithCancel(t.Context())
+
+		go g.RunAccrualSync(ctx)
+		cancel()
+
+		waitAccrualSync(t, g, time.Second)
+		assert.Empty(t, storage.called)
+	})
+
+	t.Run("sync orders on tick", func(t *testing.T) {
+		storage := &fakeStorage{}
+		g := New(storage, "http://accrual", logger)
+		ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond)
+		t.Cleanup(cancel)
+
+		go g.RunAccrualSync(ctx)
+
+		waitAccrualSync(t, g, 3*time.Second)
+		assert.Equal(t, []string{"GetUnfinishedOrders"}, storage.called)
+	})
 }
