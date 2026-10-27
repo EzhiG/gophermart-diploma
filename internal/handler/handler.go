@@ -133,6 +133,11 @@ func (h *Handler) APIPostUserOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	orderNumber := strings.TrimSpace(string(raw))
+	if orderNumber == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
 	err = h.mart.CreateOrder(r.Context(), userID, orderNumber)
 	if err != nil {
 		if errors.Is(err, gophermart.ErrInvalidOrderNumber) {

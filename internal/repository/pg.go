@@ -236,12 +236,12 @@ func (s *PGStorage) WithdrawUserBalance(ctx context.Context, userID model.UserID
 	}
 	defer tx.Rollback()
 
-	err = createWithdrawal(ctx, tx, userID, orderNumber, sum)
+	err = withdrawUserBalance(ctx, tx, userID, sum)
 	if err != nil {
 		return err
 	}
 
-	err = withdrawUserBalance(ctx, tx, userID, sum)
+	err = createWithdrawal(ctx, tx, userID, orderNumber, sum)
 	if err != nil {
 		return err
 	}

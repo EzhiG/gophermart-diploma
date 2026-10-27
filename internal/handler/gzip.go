@@ -13,9 +13,10 @@ var supportedContentTypes = []string{
 }
 
 type compressWriter struct {
-	w        http.ResponseWriter
-	zw       *gzip.Writer
-	compress bool
+	w           http.ResponseWriter
+	zw          *gzip.Writer
+	compress    bool
+	wroteHeader bool
 }
 
 func newCompressWriter(w http.ResponseWriter) *compressWriter {
@@ -31,6 +32,10 @@ func (c *compressWriter) Header() http.Header {
 }
 
 func (c *compressWriter) Write(p []byte) (int, error) {
+	if !c.wroteHeader {
+		c.WriteHeader(http.StatusOK)
+	}
+
 	if c.compress {
 		return c.zw.Write(p)
 	}
@@ -39,6 +44,7 @@ func (c *compressWriter) Write(p []byte) (int, error) {
 }
 
 func (c *compressWriter) WriteHeader(statusCode int) {
+	c.wroteHeader = true
 	contentType := c.w.Header().Get("Content-Type")
 	if statusCode < 300 && hasSupportedContentType(contentType) {
 		c.compress = true
