@@ -5,6 +5,13 @@ linters:
     - rowserrcheck
     - sqlclosecheck
     - nilerr
+    - revive
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
 
   exclusions:
     rules:

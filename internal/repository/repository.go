@@ -1,3 +1,6 @@
+// Package repository - хранилище системы в PostgreSQL.
+// Переводит ошибки базы в доменные ошибки пакета gophermart.
+// Суммы хранятся в NUMERIC(10,2), без потери точности float.
 package repository
 
 import (
@@ -6,6 +9,7 @@ import (
 	"github.com/EzhiG/gophermart-diploma/internal/model"
 )
 
+// Storage - полный набор операций хранилища. Реализация - PGStorage.
 type Storage interface {
 	CreateUser(ctx context.Context, login, passwordHash string) (model.UserID, error)
 	GetUserCredentials(ctx context.Context, login string) (*model.UserCredentials, error)

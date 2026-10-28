@@ -35,6 +35,11 @@ func getAuthCookie(r *http.Request) string {
 	return cookie.Value
 }
 
+// NewAuthMiddleware возвращает middleware авторизации.
+// Middleware читает токен из cookie "token" и кладет UserID в context запроса.
+// Если cookie нет или токен недействителен, отвечает 401 и не вызывает следующий хендлер.
+// Если до окончания действия токена осталось меньше половины срока, выпускает новый токен в cookie.
+// Если новый токен выпустить не удалось, отвечает 500.
 func (h *Handler) NewAuthMiddleware() func(next http.Handler) http.Handler {
 	mw := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1,3 +1,5 @@
+// Package gophermart содержит бизнес-логику накопительной системы: заказы, баланс,
+// списания и синхронизацию заказов с системой расчета.
 package gophermart
 
 import (
@@ -13,6 +15,8 @@ import (
 	"go.uber.org/zap"
 )
 
+// Storage - хранилище, которое использует Gophermart.
+// Контракт методов описан в repository.PGStorage.
 type Storage interface {
 	GetUserBalance(ctx context.Context, userID model.UserID) (*model.UserBalance, error)
 	CreateUserOrder(ctx context.Context, userID model.UserID, orderNumber string) (bool, error)
@@ -23,6 +27,8 @@ type Storage interface {
 	WithdrawUserBalance(ctx context.Context, userID model.UserID, orderNumber string, sum float64) error
 	GetUnfinishedOrders(ctx context.Context) ([]string, error)
 }
+
+// Gophermart - сервис накопительной системы.
 type Gophermart struct {
 	storage              Storage
 	accrualSystemAddress string
@@ -30,6 +36,8 @@ type Gophermart struct {
 	doneCh               chan struct{}
 }
 
+// New создает сервис.
+// accrualSystemAddress - адрес системы расчета, например http://localhost:8081.
 func New(storage Storage, accrualSystemAddress string, logger *zap.SugaredLogger) *Gophermart {
 	return &Gophermart{
 		storage:              storage,
@@ -39,10 +47,17 @@ func New(storage Storage, accrualSystemAddress string, logger *zap.SugaredLogger
 	}
 }
 
+// WaitAccrualSync блокирует вызывающую горутину до выхода из RunAccrualSync.
 func (g *Gophermart) WaitAccrualSync() {
 	<-g.doneCh
 }
 
+// RunAccrualSync синхронизирует незавершенные заказы с системой расчета.
+// Блокирует вызывающую горутину до отмены ctx.
+// Раз в 1 секунду получает до 100 незавершенных заказов и вызывает SyncOrder для каждого.
+// При ответе 429 ждет Retry-After секунд. Если заголовок некорректен, ждет 60 секунд.
+// Остальные ошибки записывает в лог и переходит к следующему заказу.
+// После выхода разблокирует WaitAccrualSync.
 func (g *Gophermart) RunAccrualSync(ctx context.Context) {
 	defer close(g.doneCh)
 	ticker := time.NewTicker(1 * time.Second)
@@ -94,6 +109,12 @@ func (g *Gophermart) syncOrders(ctx context.Context) {
 	}
 }
 
+// CreateOrder регистрирует заказ orderNumber для пользователя userID.
+// Возвращает:
+//   - ErrInvalidOrderNumber, если номер не проходит проверку по алгоритму Луна;
+//   - ErrOrderAlreadyCreated, если этот пользователь уже загрузил заказ;
+//   - ErrOrderAlreadyCreatedByOther, если заказ загрузил другой пользователь;
+//   - другую ошибку без изменений.
 func (g *Gophermart) CreateOrder(ctx context.Context, userID model.UserID, orderNumber string) error {
 	if !checkLuhn(orderNumber) {
 		return ErrInvalidOrderNumber
@@ -109,14 +130,24 @@ func (g *Gophermart) CreateOrder(ctx context.Context, userID model.UserID, order
 	return nil
 }
 
+// GetUserOrderList возвращает заказы пользователя.
+// Если заказов нет, возвращает пустой список без ошибки.
 func (g *Gophermart) GetUserOrderList(ctx context.Context, userID model.UserID) ([]model.UserOrderItem, error) {
 	return g.storage.GetUserOrderList(ctx, userID)
 }
 
+// GetUserBalance возвращает баланс пользователя.
+// Если пользователь не найден, возвращает ErrUserNotFound.
 func (g *Gophermart) GetUserBalance(ctx context.Context, userID model.UserID) (*model.UserBalance, error) {
 	return g.storage.GetUserBalance(ctx, userID)
 }
 
+// UserWithdraw списывает sum баллов с баланса пользователя в счет заказа orderNumber.
+// Возвращает:
+//   - ErrInvalidOrderNumber, если номер не проходит проверку по алгоритму Луна;
+//   - ErrWithdrawalNotPositive, если sum меньше или равна нулю;
+//   - ErrInsufficientFunds, если на балансе меньше sum баллов;
+//   - другую ошибку без изменений.
 func (g *Gophermart) UserWithdraw(ctx context.Context, userID model.UserID, orderNumber string, sum float64) error {
 	if !checkLuhn(orderNumber) {
 		return ErrInvalidOrderNumber
@@ -127,10 +158,23 @@ func (g *Gophermart) UserWithdraw(ctx context.Context, userID model.UserID, orde
 	return g.storage.WithdrawUserBalance(ctx, userID, orderNumber, sum)
 }
 
+// GetUserWithdrawals возвращает списания пользователя.
+// Если списаний нет, возвращает пустой список без ошибки.
 func (g *Gophermart) GetUserWithdrawals(ctx context.Context, userID model.UserID) ([]model.UserWithdrawalItem, error) {
 	return g.storage.GetUserWithdrawals(ctx, userID)
 }
 
+// SyncOrder запрашивает заказ orderNumber в системе расчета и обновляет его статус.
+// Таймаут запроса - 5 секунд.
+// Статус REGISTERED заказ не меняет.
+// Статус PROCESSED с начислением зачисляет начисление на баланс владельца заказа.
+// Если заказ уже в финальном статусе, ничего не меняет и возвращает nil.
+// Возвращает:
+//   - ErrAccrualOrderNotFound, если система расчета ответила 204;
+//   - *AccrualRequestLimitError, если система расчета ответила 429;
+//   - ErrUnknownOrderStatus, если система расчета вернула неизвестный статус;
+//   - ошибку HTTP-запроса или хранилища без изменений.
+//
 func (g *Gophermart) SyncOrder(ctx context.Context, orderNumber string) error {
 	accrualOrder, err := getAccrualOrder(ctx, g.accrualSystemAddress, orderNumber)
 	if err != nil {

@@ -1,7 +1,9 @@
+// Package logger создает логгер middleware для логирования HTTP-запросов.
 package logger
 
 import "go.uber.org/zap"
 
+// New создает логгер в dev-режиме.
 func New() (*zap.SugaredLogger, error) {
 	logger, err := zap.NewDevelopment()
 	if err != nil {

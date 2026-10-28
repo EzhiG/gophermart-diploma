@@ -29,6 +29,8 @@ func (w *logResponseWriter) WriteHeader(statusCode int) {
 	w.responseData.status = statusCode
 }
 
+// NewMiddleware возвращает middleware, которое пишет в лог каждый запрос на уровне Info.
+// Запись содержит URI, метод, код ответа, длительность и размер тела ответа в байтах.
 func NewMiddleware(sugar *zap.SugaredLogger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		loggedHandler := func(w http.ResponseWriter, r *http.Request) {

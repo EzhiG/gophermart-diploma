@@ -99,6 +99,14 @@ func hasSupportedContentType(contentType string) bool {
 	return false
 }
 
+// GzipMiddleware сжимает ответ и распаковывает запрос в формате gzip.
+// Ответ сжимается, если выполнены все условия:
+//   - запрос содержит Accept-Encoding: gzip;
+//   - Content-Type ответа - application/json или text/html;
+//   - код ответа меньше 300.
+//
+// Запрос распаковывается, если он содержит Content-Encoding: gzip.
+// Если тело запроса не gzip, отвечает 500.
 func (h *Handler) GzipMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ow := w

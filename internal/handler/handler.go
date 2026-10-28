@@ -1,3 +1,5 @@
+// Package handler - HTTP-слой системы: хендлеры эндпоинтов /api/user/* и middleware.
+// Сервисы подключаются через интерфейсы AuthService и MartService.
 package handler
 
 import (
@@ -14,6 +16,8 @@ import (
 	"go.uber.org/zap"
 )
 
+// AuthService - сервис авторизации, который использует Handler.
+// Контракт методов описан в auth.Auth.
 type AuthService interface {
 	WithUserID(ctx context.Context, userID model.UserID) context.Context
 	UserIDFromContext(ctx context.Context) model.UserID
@@ -24,6 +28,8 @@ type AuthService interface {
 	Login(ctx context.Context, login, password string) (model.UserID, error)
 }
 
+// MartService - сервис накопительной системы, который использует Handler.
+// Контракт методов описан в gophermart.Gophermart.
 type MartService interface {
 	CreateOrder(ctx context.Context, userID model.UserID, orderNumber string) error
 	GetUserOrderList(ctx context.Context, userID model.UserID) ([]model.UserOrderItem, error)
@@ -32,14 +38,17 @@ type MartService interface {
 	GetUserWithdrawals(ctx context.Context, userID model.UserID) ([]model.UserWithdrawalItem, error)
 }
 
+// Middleware - обертка над http.HandlerFunc.
 type Middleware func(http.HandlerFunc) http.HandlerFunc
 
+// Handler содержит хендлеры и middleware системы.
 type Handler struct {
 	auth   AuthService
 	mart   MartService
 	logger *zap.SugaredLogger
 }
 
+// New создает Handler.
 func New(auth AuthService, mart MartService, logger *zap.SugaredLogger) *Handler {
 	handler := &Handler{
 		auth:   auth,
@@ -50,6 +59,15 @@ func New(auth AuthService, mart MartService, logger *zap.SugaredLogger) *Handler
 	return handler
 }
 
+// APIPostUserRegister обрабатывает POST /api/user/register.
+// Тело запроса - model.UserRegisterRequest в JSON.
+// При успехе устанавливает cookie авторизации: пользователь сразу авторизован.
+// Коды ответа:
+//   - 200 - пользователь создан;
+//   - 400 - тело запроса не JSON или пароль длиннее 72 байт;
+//   - 401 - логин или пароль пустые;
+//   - 409 - логин занят;
+//   - 500 - внутренняя ошибка.
 func (h *Handler) APIPostUserRegister(w http.ResponseWriter, r *http.Request) {
 	req := model.UserRegisterRequest{}
 	err := json.NewDecoder(r.Body).Decode(&req)
@@ -88,6 +106,14 @@ func (h *Handler) APIPostUserRegister(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// APIPostUserLogin обрабатывает POST /api/user/login.
+// Тело запроса - model.UserLoginRequest в JSON.
+// При успехе устанавливает cookie авторизации.
+// Коды ответа:
+//   - 200 - пользователь авторизован;
+//   - 400 - тело запроса не JSON;
+//   - 401 - логин или пароль неверные;
+//   - 500 - внутренняя ошибка.
 func (h *Handler) APIPostUserLogin(w http.ResponseWriter, r *http.Request) {
 	req := model.UserLoginRequest{}
 	err := json.NewDecoder(r.Body).Decode(&req)
@@ -118,6 +144,16 @@ func (h *Handler) APIPostUserLogin(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// APIPostUserOrder обрабатывает POST /api/user/orders.
+// Тело запроса - номер заказа в text/plain. Пробелы по краям игнорируются.
+// Коды ответа:
+//   - 202 - заказ принят;
+//   - 200 - этот пользователь уже загрузил заказ;
+//   - 400 - тело запроса пустое;
+//   - 401 - пользователь не авторизован;
+//   - 409 - заказ загрузил другой пользователь;
+//   - 422 - номер не проходит проверку по алгоритму Луна;
+//   - 500 - внутренняя ошибка.
 func (h *Handler) APIPostUserOrder(w http.ResponseWriter, r *http.Request) {
 	userID := h.auth.UserIDFromContext(r.Context())
 	if userID == 0 {
@@ -160,6 +196,13 @@ func (h *Handler) APIPostUserOrder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// APIGetUserOrders обрабатывает GET /api/user/orders.
+// Тело ответа - model.UserOrderListResponse в JSON.
+// Коды ответа:
+//   - 200 - список заказов;
+//   - 204 - заказов нет;
+//   - 401 - пользователь не авторизован;
+//   - 500 - внутренняя ошибка.
 func (h *Handler) APIGetUserOrders(w http.ResponseWriter, r *http.Request) {
 	userID := h.auth.UserIDFromContext(r.Context())
 	if userID == 0 {
@@ -183,6 +226,12 @@ func (h *Handler) APIGetUserOrders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// APIGetUserBalance обрабатывает GET /api/user/balance.
+// Тело ответа - model.UserBalance в JSON.
+// Коды ответа:
+//   - 200 - баланс;
+//   - 401 - пользователь не авторизован;
+//   - 500 - внутренняя ошибка.
 func (h *Handler) APIGetUserBalance(w http.ResponseWriter, r *http.Request) {
 	userID := h.auth.UserIDFromContext(r.Context())
 	if userID == 0 {
@@ -202,6 +251,15 @@ func (h *Handler) APIGetUserBalance(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// APIPostUserWithdraw обрабатывает POST /api/user/balance/withdraw.
+// Тело запроса - model.UserWithdrawRequest в JSON.
+// Коды ответа:
+//   - 200 - баллы списаны;
+//   - 400 - тело запроса не JSON, или сумма меньше или равна нулю;
+//   - 401 - пользователь не авторизован;
+//   - 402 - на балансе недостаточно баллов;
+//   - 422 - номер заказа не проходит проверку по алгоритму Луна;
+//   - 500 - внутренняя ошибка.
 func (h *Handler) APIPostUserWithdraw(w http.ResponseWriter, r *http.Request) {
 	userID := h.auth.UserIDFromContext(r.Context())
 	if userID == 0 {
@@ -236,6 +294,13 @@ func (h *Handler) APIPostUserWithdraw(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// APIGetUserWithdrawals обрабатывает GET /api/user/withdrawals.
+// Тело ответа - model.UserWithdrawalListResponse в JSON.
+// Коды ответа:
+//   - 200 - список списаний;
+//   - 204 - списаний нет;
+//   - 401 - пользователь не авторизован;
+//   - 500 - внутренняя ошибка.
 func (h *Handler) APIGetUserWithdrawals(w http.ResponseWriter, r *http.Request) {
 	userID := h.auth.UserIDFromContext(r.Context())
 	if userID == 0 {

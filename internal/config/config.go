@@ -1,3 +1,5 @@
+// Package config читает конфигурацию из флагов командной строки и переменных окружения.
+// Переменная окружения имеет приоритет над флагом.
 package config
 
 import (
@@ -6,18 +8,26 @@ import (
 	"time"
 )
 
+// Config - конфигурация сервиса.
 type Config struct {
-	RunAddress           string
-	DatabaseURI          string
+	// RunAddress - адрес HTTP-сервера. Флаг -a, переменная RUN_ADDRESS.
+	// По умолчанию localhost:8080.
+	RunAddress string
+	// DatabaseURI - строка подключения к PostgreSQL. Флаг -d, переменная DATABASE_URI.
+	DatabaseURI string
+	// AccrualSystemAddress - адрес системы расчета. Флаг -r, переменная ACCRUAL_SYSTEM_ADDRESS.
 	AccrualSystemAddress string
-	SecretKey            string
-	TokenExpirationTime  time.Duration
+	// SecretKey - ключ подписи JWT-токенов. Задается константой.
+	SecretKey string
+	// TokenExpirationTime - срок действия JWT-токена. Задается константой: 24 часа.
+	TokenExpirationTime time.Duration
 }
 
 // TODO: по-хорошему, это должно быть в env variables
 const secretKey = "MySecretKey"
 const tokenExpirationTime = 24 * time.Hour
 
+// New возвращает конфигурацию из os.Args и переменных окружения.
 func New() *Config {
 	return parse(os.Args[1:])
 }

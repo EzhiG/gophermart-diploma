@@ -21,10 +21,13 @@ type sqlExecutor interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// PGStorage - хранилище в PostgreSQL.
 type PGStorage struct {
 	db *sql.DB
 }
 
+// NewPGStorage подключается к базе по dsn и применяет миграции из пакета migrations.
+// Возвращает ошибку, если миграции не применились.
 func NewPGStorage(dsn string) (*PGStorage, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
@@ -62,6 +65,8 @@ func (s *PGStorage) applyMigrations() error {
 	return nil
 }
 
+// CreateUser создает пользователя и возвращает его UserID.
+// Если логин занят, возвращает gophermart.ErrUserExists.
 func (s *PGStorage) CreateUser(ctx context.Context, login, passwordHash string) (model.UserID, error) {
 	query := `INSERT INTO users (login, password_hash) VALUES ($1, $2) RETURNING id`
 	row := s.db.QueryRowContext(ctx, query, login, passwordHash)
@@ -79,6 +84,8 @@ func (s *PGStorage) CreateUser(ctx context.Context, login, passwordHash string) 
 	return userID, nil
 }
 
+// GetUserCredentials возвращает UserID, логин и хеш пароля по логину.
+// Если пользователь не найден, возвращает gophermart.ErrUserNotFound.
 func (s *PGStorage) GetUserCredentials(ctx context.Context, login string) (*model.UserCredentials, error) {
 	credentials := model.UserCredentials{}
 	query := `SELECT id, login, password_hash FROM users WHERE login = $1`
@@ -94,6 +101,8 @@ func (s *PGStorage) GetUserCredentials(ctx context.Context, login string) (*mode
 	return &credentials, nil
 }
 
+// GetUserBalance возвращает баланс пользователя.
+// Если пользователь не найден, возвращает gophermart.ErrUserNotFound.
 func (s *PGStorage) GetUserBalance(ctx context.Context, userID model.UserID) (*model.UserBalance, error) {
 	row := s.db.QueryRowContext(ctx, "SELECT current, withdrawn FROM users WHERE id = $1", userID)
 	var balance model.UserBalance
@@ -109,6 +118,9 @@ func (s *PGStorage) GetUserBalance(ctx context.Context, userID model.UserID) (*m
 	return &balance, nil
 }
 
+// CreateUserOrder сохраняет заказ orderNumber за пользователем userID в статусе NEW.
+// Возвращает true, если заказ новый, и false, если этот пользователь уже загрузил заказ.
+// Если заказ загрузил другой пользователь, возвращает gophermart.ErrOrderAlreadyCreatedByOther.
 func (s *PGStorage) CreateUserOrder(ctx context.Context, userID model.UserID, orderNumber string) (bool, error) {
 	query := `INSERT INTO orders (user_id, number) VALUES ($1, $2) ON CONFLICT(number) DO NOTHING RETURNING user_id`
 	var ownerID model.UserID
@@ -131,6 +143,8 @@ func (s *PGStorage) CreateUserOrder(ctx context.Context, userID model.UserID, or
 	return true, nil
 }
 
+// GetUserOrderList возвращает заказы пользователя.
+// Если заказов нет, возвращает nil без ошибки.
 func (s *PGStorage) GetUserOrderList(ctx context.Context, userID model.UserID) ([]model.UserOrderItem, error) {
 	query := `SELECT number, status, accrual, uploaded_at FROM orders WHERE user_id = $1 ORDER BY uploaded_at DESC`
 	var orders []model.UserOrderItem
@@ -155,6 +169,7 @@ func (s *PGStorage) GetUserOrderList(ctx context.Context, userID model.UserID) (
 	return orders, nil
 }
 
+// GetUnfinishedOrders возвращает номера до 100 незавершенных заказов всех пользователей.
 func (s *PGStorage) GetUnfinishedOrders(ctx context.Context) ([]string, error) {
 	orderNumbers := make([]string, 0)
 	query := `SELECT number FROM orders WHERE status IN ('NEW', 'PROCESSING') ORDER BY uploaded_at LIMIT 100`
@@ -180,11 +195,16 @@ func (s *PGStorage) GetUnfinishedOrders(ctx context.Context) ([]string, error) {
 	return orderNumbers, nil
 }
 
+// UpdateUserOrderStatus меняет статус незавершенного заказа на status.
+// Если заказ не найден или уже в финальном статусе, возвращает gophermart.ErrOrderAlreadyProcessed.
 func (s *PGStorage) UpdateUserOrderStatus(ctx context.Context, orderNumber string, status model.OrderStatus) error {
 	_, err := updateUserOrder(ctx, s.db, orderNumber, status, nil)
 	return err
 }
 
+// SetUserOrderProcessed в одной транзакции переводит заказ в PROCESSED,
+// сохраняет accrual и зачисляет accrual на баланс владельца заказа.
+// Если заказ не найден или уже в финальном статусе, возвращает gophermart.ErrOrderAlreadyProcessed.
 func (s *PGStorage) SetUserOrderProcessed(ctx context.Context, orderNumber string, accrual float64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -204,6 +224,8 @@ func (s *PGStorage) SetUserOrderProcessed(ctx context.Context, orderNumber strin
 	return tx.Commit()
 }
 
+// GetUserWithdrawals возвращает списания пользователя.
+// Если списаний нет, возвращает nil без ошибки.
 func (s *PGStorage) GetUserWithdrawals(ctx context.Context, userID model.UserID) ([]model.UserWithdrawalItem, error) {
 	query := `SELECT order_number, sum, processed_at FROM withdrawals WHERE user_id = $1 ORDER BY processed_at DESC`
 	var withdrawals []model.UserWithdrawalItem
@@ -229,6 +251,12 @@ func (s *PGStorage) GetUserWithdrawals(ctx context.Context, userID model.UserID)
 	return withdrawals, nil
 }
 
+// WithdrawUserBalance в одной транзакции уменьшает баланс на sum и сохраняет списание.
+// Баланс не уходит ниже нуля.
+// Возвращает:
+//   - gophermart.ErrInsufficientFunds, если на балансе меньше sum;
+//   - gophermart.ErrUserNotFound, если пользователь не найден;
+//   - ошибку базы без изменений.
 func (s *PGStorage) WithdrawUserBalance(ctx context.Context, userID model.UserID, orderNumber string, sum float64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -249,6 +277,7 @@ func (s *PGStorage) WithdrawUserBalance(ctx context.Context, userID model.UserID
 	return tx.Commit()
 }
 
+// Close закрывает подключения к базе.
 func (s *PGStorage) Close() error {
 	return s.db.Close()
 }
