@@ -167,7 +167,7 @@ func TestHandler_APIPostUserRegister(t *testing.T) {
 		{
 			name:       "invalid credentials",
 			body:       validBody,
-			wantStatus: http.StatusUnauthorized,
+			wantStatus: http.StatusBadRequest,
 			wantCalled: true,
 			err:        gophermart.ErrInvalidCredentials,
 		},

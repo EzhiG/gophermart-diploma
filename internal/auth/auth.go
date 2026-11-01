@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/EzhiG/gophermart-diploma/internal/gophermart"
 	"github.com/EzhiG/gophermart-diploma/internal/model"
@@ -30,6 +31,7 @@ type Auth struct {
 type ctxKey string
 
 const userIDKey ctxKey = "user_id"
+const loginMaxChars = 255
 
 // New создает сервис.
 // secretKey - ключ подписи токенов.
@@ -128,7 +130,7 @@ func (a *Auth) checkPasswordHash(password, hash string) error {
 // Register создает пользователя и возвращает его UserID.
 // Пароль хранится в виде криптографического хеша.
 // Возвращает:
-//   - gophermart.ErrInvalidCredentials, если логин или пароль пустые;
+//   - gophermart.ErrInvalidCredentials, если логин или пароль пустые либо логин длиннее 255 символов;
 //   - gophermart.ErrPasswordTooLong, если пароль длиннее 72 байт;
 //   - gophermart.ErrUserExists, если логин занят;
 //   - ошибку хранилища без изменений.
@@ -136,6 +138,11 @@ func (a *Auth) Register(ctx context.Context, login, password string) (model.User
 	if len(login) == 0 || len(password) == 0 {
 		return 0, gophermart.ErrInvalidCredentials
 	}
+
+	if utf8.RuneCountInString(login) > loginMaxChars {
+		return 0, gophermart.ErrInvalidCredentials
+	}
+
 	hash, err := a.hashPassword(password)
 	if err != nil {
 		return 0, err

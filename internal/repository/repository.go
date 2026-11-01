@@ -21,5 +21,5 @@ type Storage interface {
 	GetUserWithdrawals(ctx context.Context, userID model.UserID) ([]model.UserWithdrawalItem, error)
 	WithdrawUserBalance(ctx context.Context, userID model.UserID, orderNumber string, sum float64) error
 	GetUnfinishedOrders(ctx context.Context) ([]string, error)
-	Close() error
+	Close()
 }

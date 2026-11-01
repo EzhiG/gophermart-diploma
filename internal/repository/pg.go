@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 
 	"github.com/EzhiG/gophermart-diploma/internal/gophermart"
@@ -12,30 +11,34 @@ import (
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 type sqlExecutor interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
+	Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
 }
 
 // PGStorage - хранилище в PostgreSQL.
 type PGStorage struct {
-	db *sql.DB
+	pool *pgxpool.Pool
 }
 
 // NewPGStorage подключается к базе по dsn и применяет миграции из пакета migrations.
 // Возвращает ошибку, если миграции не применились.
 func NewPGStorage(dsn string) (*PGStorage, error) {
-	db, err := sql.Open("pgx", dsn)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, err
 	}
-	storage := &PGStorage{db: db}
+	storage := &PGStorage{pool}
 
 	if err := storage.applyMigrations(); err != nil {
+		pool.Close()
 		return nil, err
 	}
 
@@ -43,10 +46,20 @@ func NewPGStorage(dsn string) (*PGStorage, error) {
 }
 
 func (s *PGStorage) applyMigrations() error {
-	dbDriver, err := postgres.WithInstance(s.db, &postgres.Config{})
+	ctx := context.Background()
+	db := stdlib.OpenDBFromPool(s.pool)
+	defer db.Close()
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
+	defer conn.Close()
+
+	dbDriver, err := postgres.WithConnection(ctx, conn, &postgres.Config{})
+	if err != nil {
+		return err
+	}
+	defer dbDriver.Close()
 
 	sourceDriver, err := iofs.New(migrations.FS, ".")
 	if err != nil {
@@ -69,7 +82,7 @@ func (s *PGStorage) applyMigrations() error {
 // Если логин занят, возвращает gophermart.ErrUserExists.
 func (s *PGStorage) CreateUser(ctx context.Context, login, passwordHash string) (model.UserID, error) {
 	query := `INSERT INTO users (login, password_hash) VALUES ($1, $2) RETURNING id`
-	row := s.db.QueryRowContext(ctx, query, login, passwordHash)
+	row := s.pool.QueryRow(ctx, query, login, passwordHash)
 	var userID model.UserID
 	err := row.Scan(&userID)
 	if err != nil {
@@ -89,9 +102,9 @@ func (s *PGStorage) CreateUser(ctx context.Context, login, passwordHash string) 
 func (s *PGStorage) GetUserCredentials(ctx context.Context, login string) (*model.UserCredentials, error) {
 	credentials := model.UserCredentials{}
 	query := `SELECT id, login, password_hash FROM users WHERE login = $1`
-	err := s.db.QueryRowContext(ctx, query, login).Scan(&credentials.ID, &credentials.Login, &credentials.PasswordHash)
+	err := s.pool.QueryRow(ctx, query, login).Scan(&credentials.ID, &credentials.Login, &credentials.PasswordHash)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, gophermart.ErrUserNotFound
 		}
 
@@ -104,12 +117,12 @@ func (s *PGStorage) GetUserCredentials(ctx context.Context, login string) (*mode
 // GetUserBalance возвращает баланс пользователя.
 // Если пользователь не найден, возвращает gophermart.ErrUserNotFound.
 func (s *PGStorage) GetUserBalance(ctx context.Context, userID model.UserID) (*model.UserBalance, error) {
-	row := s.db.QueryRowContext(ctx, "SELECT current, withdrawn FROM users WHERE id = $1", userID)
+	row := s.pool.QueryRow(ctx, "SELECT current, withdrawn FROM users WHERE id = $1", userID)
 	var balance model.UserBalance
 
 	err := row.Scan(&balance.Current, &balance.Withdrawn)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, gophermart.ErrUserNotFound
 		}
 		return nil, err
@@ -124,10 +137,10 @@ func (s *PGStorage) GetUserBalance(ctx context.Context, userID model.UserID) (*m
 func (s *PGStorage) CreateUserOrder(ctx context.Context, userID model.UserID, orderNumber string) (bool, error) {
 	query := `INSERT INTO orders (user_id, number) VALUES ($1, $2) ON CONFLICT(number) DO NOTHING RETURNING user_id`
 	var ownerID model.UserID
-	err := s.db.QueryRowContext(ctx, query, userID, orderNumber).Scan(&ownerID)
+	err := s.pool.QueryRow(ctx, query, userID, orderNumber).Scan(&ownerID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			ownerID, err = getOrderOwner(ctx, s.db, orderNumber)
+		if errors.Is(err, pgx.ErrNoRows) {
+			ownerID, err = getOrderOwner(ctx, s.pool, orderNumber)
 			if err != nil {
 				return false, err
 			}
@@ -148,7 +161,7 @@ func (s *PGStorage) CreateUserOrder(ctx context.Context, userID model.UserID, or
 func (s *PGStorage) GetUserOrderList(ctx context.Context, userID model.UserID) ([]model.UserOrderItem, error) {
 	query := `SELECT number, status, accrual, uploaded_at FROM orders WHERE user_id = $1 ORDER BY uploaded_at DESC`
 	var orders []model.UserOrderItem
-	rows, err := s.db.QueryContext(ctx, query, userID)
+	rows, err := s.pool.Query(ctx, query, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +186,7 @@ func (s *PGStorage) GetUserOrderList(ctx context.Context, userID model.UserID) (
 func (s *PGStorage) GetUnfinishedOrders(ctx context.Context) ([]string, error) {
 	orderNumbers := make([]string, 0)
 	query := `SELECT number FROM orders WHERE status IN ('NEW', 'PROCESSING') ORDER BY uploaded_at LIMIT 100`
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.pool.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +211,7 @@ func (s *PGStorage) GetUnfinishedOrders(ctx context.Context) ([]string, error) {
 // UpdateUserOrderStatus меняет статус незавершенного заказа на status.
 // Если заказ не найден или уже в финальном статусе, возвращает gophermart.ErrOrderAlreadyProcessed.
 func (s *PGStorage) UpdateUserOrderStatus(ctx context.Context, orderNumber string, status model.OrderStatus) error {
-	_, err := updateUserOrder(ctx, s.db, orderNumber, status, nil)
+	_, err := updateUserOrder(ctx, s.pool, orderNumber, status, nil)
 	return err
 }
 
@@ -206,11 +219,11 @@ func (s *PGStorage) UpdateUserOrderStatus(ctx context.Context, orderNumber strin
 // сохраняет accrual и зачисляет accrual на баланс владельца заказа.
 // Если заказ не найден или уже в финальном статусе, возвращает gophermart.ErrOrderAlreadyProcessed.
 func (s *PGStorage) SetUserOrderProcessed(ctx context.Context, orderNumber string, accrual float64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 	userID, err := updateUserOrder(ctx, tx, orderNumber, model.OrderStatusProcessed, &accrual)
 	if err != nil {
 		return err
@@ -221,7 +234,7 @@ func (s *PGStorage) SetUserOrderProcessed(ctx context.Context, orderNumber strin
 		return err
 	}
 
-	return tx.Commit()
+	return tx.Commit(ctx)
 }
 
 // GetUserWithdrawals возвращает списания пользователя.
@@ -229,7 +242,7 @@ func (s *PGStorage) SetUserOrderProcessed(ctx context.Context, orderNumber strin
 func (s *PGStorage) GetUserWithdrawals(ctx context.Context, userID model.UserID) ([]model.UserWithdrawalItem, error) {
 	query := `SELECT order_number, sum, processed_at FROM withdrawals WHERE user_id = $1 ORDER BY processed_at DESC`
 	var withdrawals []model.UserWithdrawalItem
-	rows, err := s.db.QueryContext(ctx, query, userID)
+	rows, err := s.pool.Query(ctx, query, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -258,11 +271,11 @@ func (s *PGStorage) GetUserWithdrawals(ctx context.Context, userID model.UserID)
 //   - gophermart.ErrUserNotFound, если пользователь не найден;
 //   - ошибку базы без изменений.
 func (s *PGStorage) WithdrawUserBalance(ctx context.Context, userID model.UserID, orderNumber string, sum float64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	err = withdrawUserBalance(ctx, tx, userID, sum)
 	if err != nil {
@@ -274,17 +287,17 @@ func (s *PGStorage) WithdrawUserBalance(ctx context.Context, userID model.UserID
 		return err
 	}
 
-	return tx.Commit()
+	return tx.Commit(ctx)
 }
 
 // Close закрывает подключения к базе.
-func (s *PGStorage) Close() error {
-	return s.db.Close()
+func (s *PGStorage) Close() {
+	s.pool.Close()
 }
 
 func createWithdrawal(ctx context.Context, exec sqlExecutor, userID model.UserID, orderNumber string, sum float64) error {
 	query := `INSERT INTO withdrawals (user_id, order_number, sum) VALUES ($1, $2, $3)`
-	_, err := exec.ExecContext(ctx, query, userID, orderNumber, sum)
+	_, err := exec.Exec(ctx, query, userID, orderNumber, sum)
 	if err != nil {
 		return err
 	}
@@ -293,23 +306,25 @@ func createWithdrawal(ctx context.Context, exec sqlExecutor, userID model.UserID
 }
 
 func withdrawUserBalance(ctx context.Context, exec sqlExecutor, userID model.UserID, sum float64) error {
-	query := `UPDATE users SET withdrawn = withdrawn + $1, current = current - $1 WHERE id = $2`
-	res, err := exec.ExecContext(ctx, query, sum, userID)
+	var balance float64
+	err := exec.QueryRow(ctx, `SELECT current FROM users WHERE id = $1 FOR UPDATE`, userID).Scan(&balance)
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.CheckViolation && pgErr.ConstraintName == "users_current_check" {
-			return gophermart.ErrInsufficientFunds
+		if errors.Is(err, pgx.ErrNoRows) {
+			return gophermart.ErrUserNotFound
 		}
-
 		return err
 	}
+	if balance < sum {
+		return gophermart.ErrInsufficientFunds
+	}
 
-	rowsAffected, err := res.RowsAffected()
+	query := `UPDATE users SET withdrawn = withdrawn + $1, current = current - $1 WHERE id = $2`
+	res, err := exec.Exec(ctx, query, sum, userID)
 	if err != nil {
 		return err
 	}
 
-	if rowsAffected == 0 {
+	if res.RowsAffected() == 0 {
 		return gophermart.ErrUserNotFound
 	}
 
@@ -318,11 +333,11 @@ func withdrawUserBalance(ctx context.Context, exec sqlExecutor, userID model.Use
 
 func updateUserOrder(ctx context.Context, exec sqlExecutor, orderNumber string, status model.OrderStatus, accrual *float64) (model.UserID, error) {
 	query := `UPDATE orders SET status = $1, accrual = $2 WHERE number = $3 AND status IN ('NEW', 'PROCESSING') RETURNING user_id`
-	row := exec.QueryRowContext(ctx, query, status, accrual, orderNumber)
+	row := exec.QueryRow(ctx, query, status, accrual, orderNumber)
 	var userID model.UserID
 	err := row.Scan(&userID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, gophermart.ErrOrderAlreadyProcessed
 		}
 		return 0, err
@@ -333,15 +348,11 @@ func updateUserOrder(ctx context.Context, exec sqlExecutor, orderNumber string, 
 
 func fulfillUserBalance(ctx context.Context, exec sqlExecutor, userID model.UserID, accrual float64) error {
 	query := "UPDATE users SET current = current + $1 WHERE id = $2"
-	res, err := exec.ExecContext(ctx, query, accrual, userID)
+	res, err := exec.Exec(ctx, query, accrual, userID)
 	if err != nil {
 		return err
 	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
+	if res.RowsAffected() == 0 {
 		return gophermart.ErrUserNotFound
 	}
 
@@ -350,12 +361,12 @@ func fulfillUserBalance(ctx context.Context, exec sqlExecutor, userID model.User
 
 func getOrderOwner(ctx context.Context, exec sqlExecutor, orderNumber string) (model.UserID, error) {
 	query := `SELECT user_id FROM orders WHERE number = $1`
-	row := exec.QueryRowContext(ctx, query, orderNumber)
+	row := exec.QueryRow(ctx, query, orderNumber)
 
 	var userID model.UserID
 	err := row.Scan(&userID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, gophermart.ErrOrderNotFound
 		}
 		return 0, err

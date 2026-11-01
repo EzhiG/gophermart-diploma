@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -54,6 +55,7 @@ func TestGophermart_CheckLuhn(t *testing.T) {
 }
 
 type fakeStorage struct {
+	mu         sync.Mutex
 	orders     []string
 	err        error
 	created    bool
@@ -63,36 +65,52 @@ type fakeStorage struct {
 }
 
 func (s *fakeStorage) GetUserBalance(_ context.Context, _ model.UserID) (*model.UserBalance, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.called = append(s.called, "GetUserBalance")
 	return nil, s.err
 }
 func (s *fakeStorage) CreateUserOrder(_ context.Context, _ model.UserID, _ string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.called = append(s.called, "CreateUserOrder")
 	return s.created, s.err
 }
 func (s *fakeStorage) GetUserOrderList(_ context.Context, _ model.UserID) ([]model.UserOrderItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.called = append(s.called, "GetUserOrderList")
 	return nil, s.err
 }
 func (s *fakeStorage) UpdateUserOrderStatus(_ context.Context, _ string, status model.OrderStatus) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.gotStatus = status
 	s.called = append(s.called, "UpdateUserOrderStatus")
 	return s.err
 }
 func (s *fakeStorage) SetUserOrderProcessed(_ context.Context, _ string, accrual float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.gotAccrual = accrual
 	s.called = append(s.called, "SetUserOrderProcessed")
 	return s.err
 }
 func (s *fakeStorage) GetUserWithdrawals(_ context.Context, _ model.UserID) ([]model.UserWithdrawalItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.called = append(s.called, "GetUserWithdrawals")
 	return nil, s.err
 }
 func (s *fakeStorage) WithdrawUserBalance(_ context.Context, _ model.UserID, _ string, _ float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.called = append(s.called, "WithdrawUserBalance")
 	return s.err
 }
 func (s *fakeStorage) GetUnfinishedOrders(_ context.Context) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.called = append(s.called, "GetUnfinishedOrders")
 	return s.orders, s.err
 }
@@ -286,7 +304,8 @@ func TestGophermart_getAccrualOrder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newAccrualServer(t, tt.status, "", tt.body)
-			accrualOrder, err := getAccrualOrder(t.Context(), srv.URL, validNumber)
+			g := New(&fakeStorage{}, srv.URL, logger)
+			accrualOrder, err := g.getAccrualOrder(t.Context(), validNumber)
 			if tt.wantAnyErr {
 				assert.Error(t, err)
 			} else {
@@ -320,7 +339,8 @@ func TestGophermart_getAccrualOrder(t *testing.T) {
 	for _, tt := range limitTests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := newAccrualServer(t, http.StatusTooManyRequests, tt.retryAfter, "some message")
-			accrualOrder, err := getAccrualOrder(t.Context(), srv.URL, validNumber)
+			g := New(&fakeStorage{}, srv.URL, logger)
+			accrualOrder, err := g.getAccrualOrder(t.Context(), validNumber)
 			var errLimit *AccrualRequestLimitError
 			require.ErrorAs(t, err, &errLimit)
 			assert.Equal(t, tt.wantRetryAfter, errLimit.RetryAfterSeconds)
@@ -332,18 +352,125 @@ func TestGophermart_getAccrualOrder(t *testing.T) {
 	t.Run("correct url", func(t *testing.T) {
 		var gotMethod string
 		var gotPath string
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotMethod = r.Method
 			gotPath = r.URL.Path
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"order":"` + validNumber + `","status":"PROCESSED","accrual":500.5}`))
 		}))
-		t.Cleanup(server.Close)
-		_, err := getAccrualOrder(t.Context(), server.URL, validNumber)
+		t.Cleanup(srv.Close)
+		g := New(&fakeStorage{}, srv.URL, logger)
+		_, err := g.getAccrualOrder(t.Context(), validNumber)
 		require.NoError(t, err)
 		assert.Equal(t, http.MethodGet, gotMethod)
 		assert.Equal(t, "/api/orders/"+validNumber, gotPath)
 	})
+}
+
+func TestGophermart_getAccrualOrder_Retry(t *testing.T) {
+	tests := []struct {
+		name     string
+		statuses []int
+		wantErr  string
+	}{
+		{
+			name:     "success on second attempt",
+			statuses: []int{http.StatusServiceUnavailable, http.StatusOK},
+		},
+		{
+			name:     "success on third attempt",
+			statuses: []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusOK},
+		},
+		{
+			name:     "attempts exhausted",
+			statuses: []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable},
+			wantErr:  "503 Service Unavailable",
+		},
+		{
+			name:     "client error is not retried",
+			statuses: []int{http.StatusBadRequest},
+			wantErr:  "400 Bad Request",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				status := tt.statuses[len(tt.statuses)-1]
+				if calls < len(tt.statuses) {
+					status = tt.statuses[calls]
+				}
+				calls++
+				mu.Unlock()
+
+				w.WriteHeader(status)
+				if status == http.StatusOK {
+					_, _ = w.Write([]byte(`{"order":"79927398713","status":"PROCESSING"}`))
+				}
+			}))
+			t.Cleanup(server.Close)
+			g := New(&fakeStorage{}, server.URL, logger)
+
+			order, err := g.getAccrualOrder(t.Context(), validNumber)
+			if tt.wantErr != "" {
+				require.EqualError(t, err, tt.wantErr)
+				assert.Nil(t, order)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, order)
+				assert.Equal(t, validNumber, order.Order)
+				assert.Equal(t, model.AccrualOrderStatusProcessing, order.Status)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, len(tt.statuses), calls)
+		})
+	}
+}
+
+func TestGophermart_getAccrualOrder_RetryCancelled(t *testing.T) {
+	var mu sync.Mutex
+	calls := 0
+	responded := make(chan struct{}, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusServiceUnavailable)
+		responded <- struct{}{}
+	}))
+	t.Cleanup(server.Close)
+	g := New(&fakeStorage{}, server.URL, logger)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	done := make(chan struct{})
+	var order *model.AccrualOrder
+	var err error
+	go func() {
+		order, err = g.getAccrualOrder(ctx, validNumber)
+		close(done)
+	}()
+
+	select {
+	case <-responded:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not reach the server")
+	}
+	timer := time.AfterFunc(20*time.Millisecond, cancel)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("retry did not stop after context cancellation")
+	}
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, order)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, calls)
 }
 
 func TestGophermart_SyncOrder(t *testing.T) {
@@ -542,20 +669,18 @@ func TestGophermart_syncOrders(t *testing.T) {
 			wantCalled: []string{"GetUnfinishedOrders", "UpdateUserOrderStatus"},
 		},
 		{
-			name:   "request limit continue after retry",
-			orders: []string{"1", "2"},
+			name:   "request limit with zero retry",
+			orders: []string{"1"},
 			responses: map[string]accrualResponse{
 				"1": {status: http.StatusTooManyRequests, retryAfter: "0", body: "too many requests"},
-				"2": processing,
 			},
-			wantCalled: []string{"GetUnfinishedOrders", "UpdateUserOrderStatus"},
+			wantCalled: []string{"GetUnfinishedOrders"},
 		},
 		{
 			name:   "request limit ctx cancelled while waiting",
-			orders: []string{"1", "2"},
+			orders: []string{"1"},
 			responses: map[string]accrualResponse{
 				"1": {status: http.StatusTooManyRequests, retryAfter: "60", body: "too many requests"},
-				"2": processing,
 			},
 			ctx: func(t *testing.T) context.Context {
 				ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
@@ -601,6 +726,124 @@ func TestGophermart_syncOrders(t *testing.T) {
 			assert.Equal(t, tt.wantCalled, storage.called)
 		})
 	}
+}
+
+func TestGophermart_syncOrders_ConcurrencyLimit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	orders := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}
+	started := make(chan struct{}, len(orders))
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var active, peak, total int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		active++
+		total++
+		if active > peak {
+			peak = active
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			active--
+			mu.Unlock()
+		}()
+
+		started <- struct{}{}
+		select {
+		case <-release:
+			w.WriteHeader(http.StatusNoContent)
+		case <-r.Context().Done():
+		case <-ctx.Done():
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	storage := &fakeStorage{orders: orders}
+	g := New(storage, server.URL, logger)
+	done := make(chan struct{})
+	go func() {
+		g.syncOrders(ctx)
+		close(done)
+	}()
+
+	for range 5 {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("five requests did not start concurrently")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("more than five requests started before a slot was released")
+	case <-done:
+		t.Fatal("syncOrders returned before requests completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("syncOrders did not finish after requests were released")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 5, peak)
+	assert.Equal(t, len(orders), total)
+}
+
+func TestGophermart_syncOrders_RequestLimitCancelsInFlight(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/orders/1":
+			select {
+			case <-started:
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+			case <-ctx.Done():
+			}
+		case "/api/orders/2":
+			close(started)
+			select {
+			case <-r.Context().Done():
+				close(cancelled)
+			case <-ctx.Done():
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	storage := &fakeStorage{orders: []string{"1", "2"}}
+	g := New(storage, server.URL, logger)
+	done := make(chan struct{})
+	go func() {
+		g.syncOrders(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-cancelled:
+	case <-ctx.Done():
+		t.Fatal("429 did not cancel the in-flight request")
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("syncOrders did not finish after cancelling the batch")
+	}
+	require.NoError(t, ctx.Err(), "the batch must stop before the parent context expires")
+	assert.Equal(t, []string{"GetUnfinishedOrders"}, storage.called)
 }
 
 func TestGophermart_RunAccrualSync(t *testing.T) {

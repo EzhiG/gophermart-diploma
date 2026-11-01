@@ -135,6 +135,34 @@ func TestAuth_Register(t *testing.T) {
 			wantErr:  gophermart.ErrInvalidCredentials,
 		},
 		{
+			name:     "login at character limit",
+			login:    strings.Repeat("a", 255),
+			password: "pass",
+			storage:  &fakeStorage{id: 7},
+			wantID:   7,
+		},
+		{
+			name:     "login exceeds character limit",
+			login:    strings.Repeat("a", 256),
+			password: "pass",
+			storage:  &fakeStorage{id: 7},
+			wantErr:  gophermart.ErrInvalidCredentials,
+		},
+		{
+			name:     "cyrillic login at character limit",
+			login:    strings.Repeat("я", 255),
+			password: "pass",
+			storage:  &fakeStorage{id: 7},
+			wantID:   7,
+		},
+		{
+			name:     "cyrillic login exceeds character limit",
+			login:    strings.Repeat("я", 256),
+			password: "pass",
+			storage:  &fakeStorage{id: 7},
+			wantErr:  gophermart.ErrInvalidCredentials,
+		},
+		{
 			name:     "too long password",
 			login:    "login",
 			password: strings.Repeat("a", 73),
@@ -166,6 +194,10 @@ func TestAuth_Register(t *testing.T) {
 			assert.Equal(t, tt.wantID, userID)
 			if tt.wantErr != nil {
 				assert.ErrorIs(t, err, tt.wantErr)
+				if errors.Is(tt.wantErr, gophermart.ErrInvalidCredentials) {
+					assert.Empty(t, tt.storage.gotLogin)
+					assert.Empty(t, tt.storage.gotHash)
+				}
 				return
 			}
 

@@ -64,8 +64,7 @@ func New(auth AuthService, mart MartService, logger *zap.SugaredLogger) *Handler
 // При успехе устанавливает cookie авторизации: пользователь сразу авторизован.
 // Коды ответа:
 //   - 200 - пользователь создан;
-//   - 400 - тело запроса не JSON или пароль длиннее 72 байт;
-//   - 401 - логин или пароль пустые;
+//   - 400 - некорректный JSON, пустые логин/пароль, логин длиннее 255 символов или пароль длиннее 72 байт;
 //   - 409 - логин занят;
 //   - 500 - внутренняя ошибка.
 func (h *Handler) APIPostUserRegister(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +78,7 @@ func (h *Handler) APIPostUserRegister(w http.ResponseWriter, r *http.Request) {
 	userID, err := h.auth.Register(r.Context(), req.Login, req.Password)
 	if err != nil {
 		if errors.Is(err, gophermart.ErrInvalidCredentials) {
-			w.WriteHeader(http.StatusUnauthorized)
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		if errors.Is(err, gophermart.ErrUserExists) {

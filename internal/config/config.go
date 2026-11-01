@@ -1,5 +1,5 @@
 // Package config читает конфигурацию из флагов командной строки и переменных окружения.
-// Переменная окружения имеет приоритет над флагом.
+// Явно заданный флаг имеет приоритет над переменной окружения.
 package config
 
 import (
@@ -26,6 +26,7 @@ type Config struct {
 // TODO: по-хорошему, это должно быть в env variables
 const secretKey = "MySecretKey"
 const tokenExpirationTime = 24 * time.Hour
+const defaultRunAddress = "localhost:8080"
 
 // New возвращает конфигурацию из os.Args и переменных окружения.
 func New() *Config {
@@ -37,11 +38,7 @@ func parse(args []string) *Config {
 	cfg := new(Config)
 	cfg.SecretKey = secretKey
 	cfg.TokenExpirationTime = tokenExpirationTime
-
-	fs.StringVar(&cfg.RunAddress, "a", "localhost:8080", "http service address")
-	fs.StringVar(&cfg.DatabaseURI, "d", "", "database uri")
-	fs.StringVar(&cfg.AccrualSystemAddress, "r", "", "accrual system address")
-	_ = fs.Parse(args)
+	cfg.RunAddress = defaultRunAddress
 
 	if envRunAddr, ok := os.LookupEnv("RUN_ADDRESS"); ok {
 		cfg.RunAddress = envRunAddr
@@ -54,6 +51,11 @@ func parse(args []string) *Config {
 	if envAccrualAddr, ok := os.LookupEnv("ACCRUAL_SYSTEM_ADDRESS"); ok {
 		cfg.AccrualSystemAddress = envAccrualAddr
 	}
+
+	fs.StringVar(&cfg.RunAddress, "a", cfg.RunAddress, "http service address")
+	fs.StringVar(&cfg.DatabaseURI, "d", cfg.DatabaseURI, "database uri")
+	fs.StringVar(&cfg.AccrualSystemAddress, "r", cfg.AccrualSystemAddress, "accrual system address")
+	_ = fs.Parse(args)
 
 	return cfg
 }

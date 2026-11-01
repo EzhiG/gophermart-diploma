@@ -52,7 +52,7 @@ func TestHandler_GzipMiddleware_Request(t *testing.T) {
 			name:       "broken gzip",
 			body:       strings.NewReader(testBody),
 			encoding:   "gzip",
-			wantStatus: http.StatusInternalServerError,
+			wantStatus: http.StatusBadRequest,
 			wantNext:   false,
 		},
 	}

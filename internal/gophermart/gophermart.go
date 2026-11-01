@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/EzhiG/gophermart-diploma/internal/model"
@@ -81,30 +82,46 @@ func (g *Gophermart) syncOrders(ctx context.Context) {
 		return
 	}
 
+	parallelCh := make(chan struct{}, 5)
+	batchCtx, cancelBatch := context.WithCancel(ctx)
+	defer cancelBatch()
+
+	wg := &sync.WaitGroup{}
+	defer wg.Wait()
+
 	for _, order := range orders {
-		if ctx.Err() != nil {
+		select {
+		case <-batchCtx.Done():
 			return
-		}
+		case parallelCh <- struct{}{}:
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() { <-parallelCh }()
+				err := g.SyncOrder(batchCtx, order)
+				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					}
+					if errors.Is(err, ErrAccrualOrderNotFound) {
+						g.logger.Debugw("Accrual order not found", "order", order)
+						return
+					}
+					var retryAfterError *AccrualRequestLimitError
+					if errors.As(err, &retryAfterError) {
+						cancelBatch()
+						g.logger.Warnw("Accrual limit reached", "order", order, "message", retryAfterError.Message, "retryAfter", retryAfterError.RetryAfterSeconds)
 
-		err = g.SyncOrder(ctx, order)
-		if err != nil {
-			if errors.Is(err, ErrAccrualOrderNotFound) {
-				g.logger.Debugw("Accrual order not found", "order", order)
-				continue
-			}
-			var retryAfterError *AccrualRequestLimitError
-			if errors.As(err, &retryAfterError) {
-				g.logger.Warnw("Accrual limit reached", "order", order, "message", retryAfterError.Message, "retryAfter", retryAfterError.RetryAfterSeconds)
-
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(time.Duration(retryAfterError.RetryAfterSeconds) * time.Second):
-					continue
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(time.Duration(retryAfterError.RetryAfterSeconds) * time.Second):
+							return
+						}
+					}
+					g.logger.Errorw("Failed to sync orders", "error", err, "order", order)
 				}
-			}
-			g.logger.Errorw("Failed to sync orders", "error", err, "order", order)
-			continue
+			}()
 		}
 	}
 }
@@ -165,7 +182,7 @@ func (g *Gophermart) GetUserWithdrawals(ctx context.Context, userID model.UserID
 }
 
 // SyncOrder запрашивает заказ orderNumber в системе расчета и обновляет его статус.
-// Таймаут запроса - 5 секунд.
+// Тайм-аут запроса - 5 секунд.
 // Статус REGISTERED заказ не меняет.
 // Статус PROCESSED с начислением зачисляет начисление на баланс владельца заказа.
 // Если заказ уже в финальном статусе, ничего не меняет и возвращает nil.
@@ -174,9 +191,8 @@ func (g *Gophermart) GetUserWithdrawals(ctx context.Context, userID model.UserID
 //   - *AccrualRequestLimitError, если система расчета ответила 429;
 //   - ErrUnknownOrderStatus, если система расчета вернула неизвестный статус;
 //   - ошибку HTTP-запроса или хранилища без изменений.
-//
 func (g *Gophermart) SyncOrder(ctx context.Context, orderNumber string) error {
-	accrualOrder, err := getAccrualOrder(ctx, g.accrualSystemAddress, orderNumber)
+	accrualOrder, err := g.getAccrualOrder(ctx, orderNumber)
 	if err != nil {
 		return err
 	}
@@ -204,53 +220,74 @@ func (g *Gophermart) SyncOrder(ctx context.Context, orderNumber string) error {
 	return ErrUnknownOrderStatus
 }
 
+func (g *Gophermart) getAccrualOrder(ctx context.Context, orderNumber string) (*model.AccrualOrder, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var lastErr error
+	duration := 100 * time.Millisecond
+	for i := range 3 {
+		if i > 0 {
+			select {
+			case <-timeoutCtx.Done():
+				return nil, timeoutCtx.Err()
+			case <-time.After(duration):
+			}
+			duration = duration * 2
+		}
+		req, err := http.NewRequestWithContext(timeoutCtx, http.MethodGet, g.accrualSystemAddress+"/api/orders/"+orderNumber, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
+			lastErr = errors.New(resp.Status)
+			_ = resp.Body.Close()
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNoContent {
+			return nil, ErrAccrualOrderNotFound
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			text, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, err
+			}
+			message := string(text)
+			retryAfter, err := strconv.Atoi(resp.Header.Get("Retry-After"))
+			if err != nil {
+				g.logger.Warnw("Failed to parse Retry-After header", "header", resp.Header, "error", err)
+				return nil, NewAccrualRequestLimitError(message, 60)
+			}
+			return nil, NewAccrualRequestLimitError(message, retryAfter)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, errors.New(resp.Status)
+		}
+
+		var accrualOrder model.AccrualOrder
+		err = json.NewDecoder(resp.Body).Decode(&accrualOrder)
+		if err != nil {
+			return nil, err
+		}
+
+		return &accrualOrder, nil
+	}
+
+	return nil, lastErr
+}
+
 func muteProcessedOrderError(err error) error {
 	if errors.Is(err, ErrOrderAlreadyProcessed) {
 		return nil
 	}
 	return err
-}
-
-func getAccrualOrder(ctx context.Context, address, orderNumber string) (*model.AccrualOrder, error) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(timeoutCtx, http.MethodGet, address+"/api/orders/"+orderNumber, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, ErrAccrualOrderNotFound
-	}
-	if resp.StatusCode == http.StatusTooManyRequests {
-		text, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		message := string(text)
-		retryAfter, err := strconv.Atoi(resp.Header.Get("Retry-After"))
-		if err != nil {
-			return nil, NewAccrualRequestLimitError(message, 60)
-		}
-		return nil, NewAccrualRequestLimitError(message, retryAfter)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New(resp.Status)
-	}
-
-	var accrualOrder model.AccrualOrder
-	err = json.NewDecoder(resp.Body).Decode(&accrualOrder)
-	if err != nil {
-		return nil, err
-	}
-
-	return &accrualOrder, nil
 }
 
 func checkLuhn(orderNumber string) bool {

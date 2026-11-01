@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,7 +30,7 @@ import (
 func main() {
 	sugar, err := logger.New()
 	if err != nil {
-		sugar.Fatal(err)
+		log.Fatal(err)
 	}
 	defer sugar.Sync()
 

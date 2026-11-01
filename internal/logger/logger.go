@@ -3,9 +3,9 @@ package logger
 
 import "go.uber.org/zap"
 
-// New создает логгер в dev-режиме.
+// New создает логгер в prod-режиме.
 func New() (*zap.SugaredLogger, error) {
-	logger, err := zap.NewDevelopment()
+	logger, err := zap.NewProduction()
 	if err != nil {
 		return nil, err
 	}
